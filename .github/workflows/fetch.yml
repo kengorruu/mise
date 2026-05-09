@@ -1,0 +1,107 @@
+name: 미세먼지 데이터 갱신
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 매일 UTC 00:00 (한국시간 오전 9시) 자동 실행
+  workflow_dispatch:      # 수동 실행 버튼
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/fetch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 파이썬 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 라이브러리 설치
+        run: pip install requests
+
+      - name: API 호출 및 data.json 생성
+        run: |
+          python << 'PYEOF'
+          import requests, json, sys
+          from datetime import datetime, timezone, timedelta
+
+          API_KEY  = '3b319f0f81c122e74ac5c3043cfb941639aabcdad152bba6932f0e5c30fe12c6'
+          BASE_URL = 'http://apis.data.go.kr/B552584/UlfptcaAlarmInqireSvc/getUlfptcaAlarmInfo'
+
+          def fetch_year(year):
+              all_items, page = [], 1
+              while True:
+                  params = {
+                      'serviceKey': API_KEY,
+                      'returnType': 'json',
+                      'numOfRows': 100,
+                      'pageNo':    page,
+                      'year':      str(year),
+                  }
+                  res = requests.get(BASE_URL, params=params, timeout=15)
+                  res.raise_for_status()
+                  data  = res.json()
+                  body  = data.get('response', {}).get('body', {}) or {}
+                  total = int(body.get('totalCount', 0) or 0)
+                  if total == 0:
+                      break
+                  items = (body.get('items') or {}).get('item', []) or []
+                  if not isinstance(items, list):
+                      items = [items]
+                  all_items.extend(items)
+                  if page * 100 >= total:
+                      break
+                  page += 1
+              return all_items
+
+          # 현재 연도부터 과거 5년까지 자동 시도
+          KST = timezone(timedelta(hours=9))
+          now = datetime.now(KST)
+          years = [now.year - i for i in range(5)]
+
+          items, used_year = [], None
+          for y in years:
+              try:
+                  result = fetch_year(y)
+                  if result:
+                      items, used_year = result, y
+                      print(f"✅ {y}년 데이터 {len(items)}건 로드")
+                      break
+                  print(f"ℹ️ {y}년: 0건, 이전 연도 시도")
+              except Exception as e:
+                  print(f"❌ {y}년 실패: {e}")
+
+          if not items:
+              print("⚠️ 모든 연도에서 데이터를 찾지 못했습니다.")
+              sys.exit(1)
+
+          output = {
+              'year':       used_year,
+              'updated_at': now.strftime('%Y-%m-%d %H:%M:%S KST'),
+              'total':      len(items),
+              'items':      items,
+          }
+          with open('data.json', 'w', encoding='utf-8') as f:
+              json.dump(output, f, ensure_ascii=False, indent=2)
+          print(f"📦 data.json 저장 완료 ({len(items)}건, {used_year}년)")
+          PYEOF
+
+      - name: 변경사항 커밋
+        run: |
+          git config --global user.name  'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add data.json
+          if git diff --cached --quiet; then
+            echo "변경사항 없음"
+          else
+            git commit -m "🔄 data.json 자동 갱신"
+            git push
+          fi

@@ -137,5 +137,6 @@ jobs:
             echo "변경사항 없음"
           else
             git commit -m "🔄 data.json 자동 갱신"
+            git pull --rebase origin main   ← 이 줄 추가
             git push
           fi

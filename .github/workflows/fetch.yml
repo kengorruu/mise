@@ -2,8 +2,8 @@ name: 미세먼지 데이터 갱신
 
 on:
   schedule:
-    - cron: '0 0 * * *'   # 매일 UTC 00:00 (한국시간 오전 9시) 자동 실행
-  workflow_dispatch:      # 수동 실행 버튼
+    - cron: '0 0 * * *'
+  workflow_dispatch:
   push:
     branches: [main, master]
     paths:
@@ -15,6 +15,8 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: 저장소 체크아웃
         uses: actions/checkout@v4
@@ -30,7 +32,7 @@ jobs:
       - name: API 호출 및 data.json 생성
         run: |
           python << 'PYEOF'
-          import requests, json, sys
+          import requests, json
           from datetime import datetime, timezone, timedelta
 
           API_KEY  = '3b319f0f81c122e74ac5c3043cfb941639aabcdad152bba6932f0e5c30fe12c6'
@@ -42,56 +44,88 @@ jobs:
                   params = {
                       'serviceKey': API_KEY,
                       'returnType': 'json',
-                      'numOfRows': 100,
-                      'pageNo':    page,
-                      'year':      str(year),
+                      'numOfRows' : '100',
+                      'pageNo'    : str(page),
+                      'year'      : str(year),
                   }
+                  print(f"\n  [요청] {year}년 / 페이지 {page}")
+                  print(f"  URL: {BASE_URL}")
                   res = requests.get(BASE_URL, params=params, timeout=15)
-                  res.raise_for_status()
-                  data  = res.json()
+                  print(f"  HTTP 상태: {res.status_code}")
+                  print(f"  응답 (앞 300자): {res.text[:300]}")
+
+                  if res.status_code != 200:
+                      print(f"  ❌ HTTP 오류")
+                      break
+
+                  try:
+                      data = res.json()
+                  except Exception as e:
+                      print(f"  ❌ JSON 파싱 실패: {e}")
+                      break
+
+                  # 헤더 오류 코드 확인
+                  header = data.get('response', {}).get('header', {})
+                  result_code = header.get('resultCode', '')
+                  result_msg  = header.get('resultMsg', '')
+                  print(f"  resultCode: {result_code}, resultMsg: {result_msg}")
+
+                  if result_code != '00':
+                      print(f"  ❌ API 오류: {result_msg}")
+                      break
+
                   body  = data.get('response', {}).get('body', {}) or {}
                   total = int(body.get('totalCount', 0) or 0)
+                  print(f"  totalCount: {total}")
+
                   if total == 0:
                       break
+
                   items = (body.get('items') or {}).get('item', []) or []
                   if not isinstance(items, list):
                       items = [items]
                   all_items.extend(items)
+                  print(f"  이번 페이지 수집: {len(items)}건 (누계: {len(all_items)}건)")
+
                   if page * 100 >= total:
                       break
                   page += 1
+
               return all_items
 
-          # 현재 연도부터 과거 5년까지 자동 시도
-          KST = timezone(timedelta(hours=9))
-          now = datetime.now(KST)
+          KST   = timezone(timedelta(hours=9))
+          now   = datetime.now(KST)
           years = [now.year - i for i in range(5)]
 
           items, used_year = [], None
           for y in years:
+              print(f"\n{'='*40}")
+              print(f"▶ {y}년 시도")
               try:
                   result = fetch_year(y)
                   if result:
                       items, used_year = result, y
-                      print(f"✅ {y}년 데이터 {len(items)}건 로드")
+                      print(f"✅ {y}년 데이터 {len(items)}건 로드 완료")
                       break
-                  print(f"ℹ️ {y}년: 0건, 이전 연도 시도")
+                  print(f"ℹ️ {y}년: 0건 → 이전 연도 시도")
               except Exception as e:
-                  print(f"❌ {y}년 실패: {e}")
+                  print(f"❌ {y}년 예외: {e}")
 
-          if not items:
-              print("⚠️ 모든 연도에서 데이터를 찾지 못했습니다.")
-              sys.exit(1)
+          print(f"\n{'='*40}")
+          if items:
+              print(f"✅ 최종 데이터: {used_year}년 {len(items)}건")
+          else:
+              print("⚠️ 모든 연도에서 데이터를 찾지 못했습니다. 빈 data.json 저장")
 
           output = {
-              'year':       used_year,
+              'year'      : used_year,
               'updated_at': now.strftime('%Y-%m-%d %H:%M:%S KST'),
-              'total':      len(items),
-              'items':      items,
+              'total'     : len(items),
+              'items'     : items,
           }
           with open('data.json', 'w', encoding='utf-8') as f:
               json.dump(output, f, ensure_ascii=False, indent=2)
-          print(f"📦 data.json 저장 완료 ({len(items)}건, {used_year}년)")
+          print(f"📦 data.json 저장 완료")
           PYEOF
 
       - name: 변경사항 커밋
